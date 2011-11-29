@@ -1,0 +1,453 @@
+*** src.clean/kernel/proc.h Thu Oct  6 22:51:27 2011
+--- src/kernel/proc.h Sat Oct 29 18:24:29 2011
+***************
+*** 230,238 ****
+   * priority) and increment.  Priorities of the processes in the boot image 
+   * can be set in table.c.
+   */
+! #define NR_SCHED_QUEUES   16	/* MUST equal minimum priority + 1 */
+! #define TASK_Q		   0	/* highest, used for kernel tasks */
+! #define MAX_USER_Q  	   0    /* highest priority for user processes */   
+  #define USER_Q  	  ((MIN_USER_Q - MAX_USER_Q) / 2 + MAX_USER_Q) /* default
+  						(should correspond to nice 0) */
+  #define MIN_USER_Q	  (NR_SCHED_QUEUES - 1)	/* minimum priority for user
+--- 230,238 ----
+   * priority) and increment.  Priorities of the processes in the boot image 
+   * can be set in table.c.
+   */
+! #define NR_SCHED_QUEUES   19	/* MUST equal minimum priority + 1 */
+! #define TASK_Q		   0	/* highest, used for kernel tasks */
+! #define MAX_USER_Q  	  16    /* highest priority for user processes */   
+  #define USER_Q  	  ((MIN_USER_Q - MAX_USER_Q) / 2 + MAX_USER_Q) /* default
+  						(should correspond to nice 0) */
+  #define MIN_USER_Q	  (NR_SCHED_QUEUES - 1)	/* minimum priority for user
+*** src.clean/servers/sched/schedproc.h Thu Oct  6 22:51:30 2011
+--- src/servers/sched/schedproc.h Sat Oct 29 18:24:57 2011
+***************
+*** 26,31 ****
+--- 26,32 ----
+  	unsigned max_priority;	/* this process' highest allowed priority */
+  	unsigned priority;		/* the process' current priority */
+  	unsigned time_slice;		/* this process's time slice */
++ 	unsigned ticketsNum;
+  } schedproc[NR_PROCS];
+  
+  /* Flag values */
+*** src.clean/servers/sched/schedule.c Thu Oct  6 22:51:31 2011
+--- src/servers/sched/schedule.c Sun Oct 30 18:00:06 2011
+***************
+*** 10,15 ****
+--- 10,16 ----
+  #include "sched.h"
+  #include "schedproc.h"
+  #include <minix/com.h>
++ #include <minix/syslib.h>
+  #include <machine/archtypes.h>
+  #include "kernel/proc.h" /* for queue constants */
+  
+***************
+*** 23,28 ****
+--- 24,32 ----
+  
+  #define DEFAULT_USER_TIME_SLICE 200
+  
++ #define PROCESS_IN_USER_Q(x) ((x)->priority >= MAX_USER_Q && \
++ 		(x)->priority <= MIN_USER_Q)
++ 
+  /*===========================================================================*
+   *				do_noquantum				     *
+   *===========================================================================*/
+***************
+*** 34,51 ****
+  
+  	if (sched_isokendpt(m_ptr->m_source, &proc_nr_n) != OK) {
+  		printf("SCHED: WARNING: got an invalid endpoint in OOQ msg %u.\n",
+! 		m_ptr->m_source);
+  		return EBADSRCDST;
+  	}
+  
+  	rmp = &schedproc[proc_nr_n];
+! 	if (rmp->priority < MIN_USER_Q) {
+! 		rmp->priority += 1; /* lower priority */
+! 	}
+  
+  	if ((rv = schedule_process(rmp)) != OK) {
+  		return rv;
+  	}
+  	return OK;
+  }
+  
+--- 38,64 ----
+  
+  	if (sched_isokendpt(m_ptr->m_source, &proc_nr_n) != OK) {
+  		printf("SCHED: WARNING: got an invalid endpoint in OOQ msg %u.\n",
+! 				m_ptr->m_source);
+  		return EBADSRCDST;
+  	}
+  
+  	rmp = &schedproc[proc_nr_n];
+! 
+! 	if (PROCESS_IN_USER_Q(rmp)) {
+! 		rmp->priority = USER_Q;
+! 	} else if (rmp->priority < MAX_USER_Q - 1){
+! 		rmp->priority += 1;
+! 	}
+! 	/* printf("do_noquantum, %d in %d\n", rmp->endpoint, rmp->priority); */
+  
+  	if ((rv = schedule_process(rmp)) != OK) {
+  		return rv;
+  	}
++ 
++ 	if ((rv = do_lottery()) != OK) {
++ 		return rv;
++ 	}
++ 
+  	return OK;
+  }
+  
+***************
+*** 63,75 ****
+  
+  	if (sched_isokendpt(m_ptr->SCHEDULING_ENDPOINT, &proc_nr_n) != OK) {
+  		printf("SCHED: WARNING: got an invalid endpoint in OOQ msg %u.\n",
+! 		m_ptr->SCHEDULING_ENDPOINT);
+  		return EBADSRCDST;
+  	}
+  
+  	rmp = &schedproc[proc_nr_n];
+  	rmp->flags = 0; /*&= ~IN_USE;*/
+  
+  	return OK;
+  }
+  
+--- 76,92 ----
+  
+  	if (sched_isokendpt(m_ptr->SCHEDULING_ENDPOINT, &proc_nr_n) != OK) {
+  		printf("SCHED: WARNING: got an invalid endpoint in OOQ msg %u.\n",
+! 				m_ptr->SCHEDULING_ENDPOINT);
+  		return EBADSRCDST;
+  	}
+  
+  	rmp = &schedproc[proc_nr_n];
+  	rmp->flags = 0; /*&= ~IN_USE;*/
+  
++ 	if ((rv = do_lottery()) != OK) {
++ 		return rv;
++ 	}
++ 
+  	return OK;
+  }
+  
+***************
+*** 96,106 ****
+  	rmp->endpoint     = m_ptr->SCHEDULING_ENDPOINT;
+  	rmp->parent       = m_ptr->SCHEDULING_PARENT;
+  	rmp->nice         = m_ptr->SCHEDULING_NICE;
+! 
+! 	/* Find maximum priority from nice value */
+! 	rv = nice_to_priority(rmp->nice, &rmp->max_priority);
+! 	if (rv != OK)
+! 		return rv;
+  
+  	/* Inherit current priority and time slice from parent. Since there
+  	 * is currently only one scheduler scheduling the whole system, this
+--- 113,126 ----
+  	rmp->endpoint     = m_ptr->SCHEDULING_ENDPOINT;
+  	rmp->parent       = m_ptr->SCHEDULING_PARENT;
+  	rmp->nice         = m_ptr->SCHEDULING_NICE;
+! 	rmp->ticketsNum   = 5;
+! 
+! 	/* Find maximum priority from nice value */
+! 	/*
+! 	   rv = nice_to_priority(rmp->nice, &rmp->max_priority);
+! 	   if (rv != OK)
+! 	   return rv;
+! 	 */
+  
+  	/* Inherit current priority and time slice from parent. Since there
+  	 * is currently only one scheduler scheduling the whole system, this
+***************
+*** 114,123 ****
+  	}
+  	else {
+  		if ((rv = sched_isokendpt(m_ptr->SCHEDULING_PARENT,
+! 				&parent_nr_n)) != OK)
+! 			return rv;
+! 
+! 		rmp->priority = schedproc[parent_nr_n].priority;
+  		rmp->time_slice = schedproc[parent_nr_n].time_slice;
+  	}
+  
+--- 134,144 ----
+  	}
+  	else {
+  		if ((rv = sched_isokendpt(m_ptr->SCHEDULING_PARENT,
+! 						&parent_nr_n)) != OK)
+! 			return rv;
+! 
+! 		/* rmp->priority = schedproc[parent_nr_n].priority; */
+! 		rmp->priority = USER_Q;
+  		rmp->time_slice = schedproc[parent_nr_n].time_slice;
+  	}
+  
+***************
+*** 125,131 ****
+  	 * the processes current priority and its time slice */
+  	if ((rv = sys_schedctl(rmp->endpoint)) != OK) {
+  		printf("Sched: Error overtaking scheduling for %d, kernel said %d\n",
+! 			rmp->endpoint, rv);
+  		return rv;
+  	}
+  	rmp->flags = IN_USE;
+--- 146,152 ----
+  	 * the processes current priority and its time slice */
+  	if ((rv = sys_schedctl(rmp->endpoint)) != OK) {
+  		printf("Sched: Error overtaking scheduling for %d, kernel said %d\n",
+! 				rmp->endpoint, rv);
+  		return rv;
+  	}
+  	rmp->flags = IN_USE;
+***************
+*** 133,139 ****
+  	/* Schedule the process, giving it some quantum */
+  	if ((rv = schedule_process(rmp)) != OK) {
+  		printf("Sched: Error while scheduling process, kernel replied %d\n",
+! 			rv);
+  		return rv;
+  	}
+  
+--- 154,160 ----
+  	/* Schedule the process, giving it some quantum */
+  	if ((rv = schedule_process(rmp)) != OK) {
+  		printf("Sched: Error while scheduling process, kernel replied %d\n",
+! 				rv);
+  		return rv;
+  	}
+  
+***************
+*** 159,165 ****
+  	int proc_nr_n;
+  	int nice;
+  	unsigned new_q, old_q, old_max_q;
+! 	int old_nice;
+  
+  	/* Only accept nice messages from PM */
+  	if (!is_from_pm(m_ptr))
+--- 180,186 ----
+  	int proc_nr_n;
+  	int nice;
+  	unsigned new_q, old_q, old_max_q;
+! 	int old_nice, old_ticketsNum;
+  
+  	/* Only accept nice messages from PM */
+  	if (!is_from_pm(m_ptr))
+***************
+*** 167,190 ****
+  
+  	if (sched_isokendpt(m_ptr->SCHEDULING_ENDPOINT, &proc_nr_n) != OK) {
+  		printf("SCHED: WARNING: got an invalid endpoint in OOQ msg %u.\n",
+! 		m_ptr->SCHEDULING_ENDPOINT);
+  		return EBADSRCDST;
+  	}
+  
+  	rmp = &schedproc[proc_nr_n];
+  	nice = m_ptr->SCHEDULING_NICE;
+  
+! 	if ((rv = nice_to_priority(nice, &new_q)) != OK)
+! 		return rv;
+  
+  	/* Store old values, in case we need to roll back the changes */
+  	old_q     = rmp->priority;
+  	old_max_q = rmp->max_priority;
+  	old_nice  = rmp->nice;
+! 
+! 	/* Update the proc entry and reschedule the process */
+! 	rmp->max_priority = rmp->priority = new_q;
+! 	rmp->nice = nice;
+  
+  	if ((rv = schedule_process(rmp)) != OK) {
+  		/* Something went wrong when rescheduling the process, roll
+--- 188,216 ----
+  
+  	if (sched_isokendpt(m_ptr->SCHEDULING_ENDPOINT, &proc_nr_n) != OK) {
+  		printf("SCHED: WARNING: got an invalid endpoint in OOQ msg %u.\n",
+! 				m_ptr->SCHEDULING_ENDPOINT);
+  		return EBADSRCDST;
+  	}
+  
+  	rmp = &schedproc[proc_nr_n];
+  	nice = m_ptr->SCHEDULING_NICE;
+  
+! 	/*
+! 	   if ((rv = nice_to_priority(nice, &new_q)) != OK)
+! 	   return rv;
+! 	 */
+  
+  	/* Store old values, in case we need to roll back the changes */
+  	old_q     = rmp->priority;
+  	old_max_q = rmp->max_priority;
+  	old_nice  = rmp->nice;
+! 	old_ticketsNum = rmp->ticketsNum;
+! 
+! 	/* Update the proc entry and reschedule the process */
+! 	/* rmp->max_priority = rmp->priority = new_q; */
+! 	rmp->priority = USER_Q;
+! 	/* rmp->nice = nice; */
+! 	rmp->nice = set_priority(nice, rmp);
+  
+  	if ((rv = schedule_process(rmp)) != OK) {
+  		/* Something went wrong when rescheduling the process, roll
+***************
+*** 192,200 ****
+  		rmp->priority     = old_q;
+  		rmp->max_priority = old_max_q;
+  		rmp->nice         = old_nice;
+! 	}
+! 
+! 	return rv;
+  }
+  
+  /*===========================================================================*
+--- 218,228 ----
+  		rmp->priority     = old_q;
+  		rmp->max_priority = old_max_q;
+  		rmp->nice         = old_nice;
+! 		rmp->ticketsNum   = old_ticketsNum;
+! 	}
+! 	/* printf("result of do_nice %d\n", rmp->ticketsNum); */
+! 
+! 	return do_lottery();
+  }
+  
+  /*===========================================================================*
+***************
+*** 205,213 ****
+  	int rv;
+  
+  	if ((rv = sys_schedule(rmp->endpoint, rmp->priority,
+! 			rmp->time_slice)) != OK) {
+! 		printf("SCHED: An error occurred when trying to schedule %d: %d\n",
+! 		rmp->endpoint, rv);
+  	}
+  
+  	return rv;
+--- 233,241 ----
+  	int rv;
+  
+  	if ((rv = sys_schedule(rmp->endpoint, rmp->priority,
+! 					rmp->time_slice)) != OK) {
+! 		printf("SCHED: An error occurred when trying to schedule %d: %d\n",
+! 				rmp->endpoint, rv);
+  	}
+  
+  	return rv;
+***************
+*** 220,228 ****
+--- 248,259 ----
+  
+  PUBLIC void init_scheduling(void)
+  {
++ 	u64_t r;
+  	balance_timeout = BALANCE_TIMEOUT * sys_hz();
+  	tmr_inittimer(&sched_timer);
+  	sched_set_timer(&sched_timer, balance_timeout, balance_queues, 0);
++ 	read_tsc_64(&r);
++ 	srand((unsigned)r.lo);
+  }
+  
+  /*===========================================================================*
+***************
+*** 242,248 ****
+  
+  	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
+  		if (rmp->flags & IN_USE) {
+! 			if (rmp->priority > rmp->max_priority) {
+  				rmp->priority -= 1; /* increase priority */
+  				schedule_process(rmp);
+  			}
+--- 273,280 ----
+  
+  	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
+  		if (rmp->flags & IN_USE) {
+! 			if (rmp->priority > rmp->max_priority && 
+! 					!PROCESS_IN_USER_Q(rmp)) {
+  				rmp->priority -= 1; /* increase priority */
+  				schedule_process(rmp);
+  			}
+***************
+*** 251,253 ****
+--- 283,356 ----
+  
+  	sched_set_timer(&sched_timer, balance_timeout, balance_queues, 0);
+  }
++ 
++ /*==========================================================================*
++  *				do_lottery				     *
++  *===========================================================================*/
++ PUBLIC int do_lottery()
++ {
++ 	struct schedproc *rmp;
++ 	int proc_nr;
++ 	int rv;
++ 	int lucky;
++ 	int old_priority;
++ 	int flag = -1;
++ 	int nTickets = 0;
++ 
++ 	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
++ 		if ((rmp->flags & IN_USE) && PROCESS_IN_USER_Q(rmp)) {
++ 			if (USER_Q == rmp->priority) {
++ 				nTickets += rmp->ticketsNum;
++ 			}
++ 		}
++ 	}
++ 
++ 	lucky = nTickets ? rand() % nTickets : 0;
++ 	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
++ 		if ((rmp->flags & IN_USE) && PROCESS_IN_USER_Q(rmp) &&
++ 				USER_Q == rmp->priority) {
++ 			old_priority = rmp->priority;
++ 			/* rmp->priority = USER_Q; */
++ 			if (lucky >= 0) {
++ 				lucky -= rmp->ticketsNum;
++ 				/*
++ 				   printf("lucky - %d = %d\n", rmp->ticketsNum, lucky);
++ 				 */
++ 				if (lucky < 0) {
++ 					rmp->priority = MAX_USER_Q;
++ 					flag = OK;
++ 					/* printf("endpoint %d\n", rmp->endpoint); */
++ 				}
++ 			}
++ 			if (old_priority != rmp->priority) {
++ 				schedule_process(rmp);
++ 			}
++ 		}
++ 	}
++ 	/*
++ 	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
++ 		if ((rmp->flags & IN_USE) && PROCESS_IN_USER_Q(rmp)) {
++ 			if (USER_Q == rmp->priority)
++ 				count_17++;
++ 			else if (MAX_USER_Q == rmp->priority)
++ 				count_16++;
++ 		}
++ 	}
++ 	printf("in 16: %d; in 17: %d\n", count_16, count_17); 
++ 	*/
++ 	/* printf("do_lottery OK? %d lucky=%d\n", flag, lucky); */
++ 	return nTickets ? flag : OK;
++ }
++ 
++ /*===========================================================================*
++  *				set_priority				     *
++  *===========================================================================*/
++ PUBLIC int set_priority(int ntickets, struct schedproc* p)
++ {
++ 	int add;
++ 
++ 	add = p->ticketsNum + ntickets > 100 ? 100 - p->ticketsNum : ntickets;
++ 	add = p->ticketsNum + ntickets < 1 ? 1 - p->ticketsNum: add;
++ 	p->ticketsNum += add;
++ 	return add;
++ }

@@ -1,0 +1,32 @@
+This patch implements a lottery scheduling policy on MINIX 3.1.7.
+The policy is mainly implemented on the servers side, with only a few modifications in kernel.
+
+=== Background ===
+As you may know, since 3.1.7 MINIX has moved scheduling from kernel to a user-level process "sched".
+In the original user-level process "sched", a simple policy receives messages from kernel, initializes or changes a process's priority or nice value, and send its updates back then. In the kernel there still remains a priority-based policy, which truly decides which process to run.
+It is clearer and more straightward to implement the policy directly in the kernel side. However, since MINIX has decided to put the policy on the user-level process, lib or other interfaces may need to be modified for the nice system call if we implements the lottery scheduler directly in kernel(we have to save the tickets number held by a process both in kernel and server sides in this case). So we decide to implement this lottery scheduling policy on the server side.
+
+=== Method ===
+First we add 3 more queues in kernel to make a place for our lottery scheduling show. To be specified, queues 0 - 15 remains what they used to be, queues 16 - 18 are newly appended for our scheduler. This is the only modifications in kernel.
+Here's how we use these newly appended queues in our scheduler then: when a process starts, we put it to queue 17; when there is a process run out of quantum, we put it to queue 17, and a lottery draw takes place right after that, which would put a winner to queue 16.
+As we know, the kernel side policy would definitely choose a highest priority process which is runnable, ignoring those in lower priority. So when there is a runnable process in queue 16, the process in queue 17 would not be executed. This is exactly what we expect because we would only put a lottery winner in queue 16, and move it away right after when it runs out of quantum.
+A main challenge here is that a blocking process would not send any message to the server side. If they were treated like other processes and their tickets were collected every time when we draw a lottery, and one of them happened to be the winner, this seems to be fine in the servers but not as well in the kernel side because an unrunnable process would not be executed so another process we did not expect would run instead. This is something we should not let it happen. Our solution here is to maintain it in the queue 16, but only collect and draw tickets from processes in queue 17. When a blocking process is able to run, it would run without a lottery draw. This is quite fair since this process must have won a time before and its quantum has not been used up yet.
+
+=== Tests ===
+We have run three longrun programs each with tickets number of 10, 20, 40. The output is quite similar to the rate 1:2:4 which they supposed to be.
+Also we recompiled the top program to monitor them, the rate of the time fields of these 3 programs are very close to 1:2:4 as well.
+Other testing programs written by ourselves have been executed to test the scheduling as well.
+
+=== Implementations ===
+Three files are modified in our implementation. They are:
+/usr/src/kernel/proc.h
+/usr/src/servers/sched/schedproc.h
+/usr/src/servers/sched/schedule.c
+The modifications in proc.h are made to add 3 more queues by change the 2 macros NR_SCHED_QUEUES and MAX_USER_Q to 19 and 16.
+In schedproc.h, an unsigned identifier ticketsNum is added to the schedproc struct to save the number of tickets held by this process.
+Most modifications are in schedule.c. 
+In schedule.c we add 2 more functions, do_lottery() and set_priority(). 
+The do_lottery() function is called every time after a do_noquantum() or do_stop_scheduling() call happens(These 2 functions are originally written in the schedule.c file). This function would scan all processes in priority USER_Q(defined in /usr/src/kernel/proc.h, which is exactly 17), collects the total number of tickets, save it in the nTickets identifier and generates a random value between [0, nTickets - 1] and save it in the lucky identifier. Then we can locate the lottery winner according to the lucky value and changes its priority to MAX_USER_Q(which is 16), send this update back by the schedule_process() function originally written in the schedule.c file.
+The set_priority() function is called every time after a do_nice() call happens(This function is originally written in the schedule.c file). This function would add a ntickets value to the process p's ticketsNum value, which we assure would never be more than 100 or less than 1. Both the ntickets value and the process (or, to be specified, a pointer to a schedproc object) are given in arguments, the ntickets is in fact the given nice value and the p is the process to be niced.
+A macro to judge whether a process is in the priority between MAX_USER_Q(which is 16) and MIN_USER_Q(which is 18) is also added in this file and named PROCESS_IN_USER_Q.
+The original do_noquantum, do_start_scheduling, do_stop_scheduling and do_nice functions have been modified as well to fit the 2 new functions. And the balance_queues function is limited to process not true for PROCESS_IN_USER_Q(which is never supposed to happen in fact).
